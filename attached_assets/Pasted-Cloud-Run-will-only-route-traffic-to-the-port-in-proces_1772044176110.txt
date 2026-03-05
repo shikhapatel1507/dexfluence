@@ -1,0 +1,128 @@
+Cloud Run will only route traffic to the port in process.env.PORT.
+
+✅ Fix (MANDATORY)
+
+In both your bootstrap (start.cjs) and your server (dist/index.cjs / source):
+
+const PORT = parseInt(process.env.PORT || '8080', 10);
+
+And:
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('Listening on', PORT);
+});
+
+❌ Remove any hardcoded 5000.
+
+🚨 2) You’re using CommonJS (.cjs) but still have import.meta
+
+“CommonJS format (cjs) causes import.meta warnings and path resolution issues in vite.config.ts”
+
+In CJS, import.meta is invalid or flaky → this can crash or stall startup → health checks time out.
+
+✅ Fix
+
+Search in your server build / config for:
+
+import.meta.url
+
+Replace with CJS-safe:
+
+const path = require('path');
+const __dirname = path.dirname(__filename);
+
+And build paths like:
+
+path.join(__dirname, 'public', 'index.html');
+
+If this is coming from your TS source, fix it there and rebuild.
+
+🚨 3) / is not guaranteed to return fast 200
+
+“health check endpoint (/) may not be implemented or responding with 200 quickly enough”
+
+Cloud Run hits:
+
+GET /
+
+It must return 200 immediately.
+Not SPA. Not DB. Not async init.
+
+✅ Fix (put this FIRST, before static / SPA middleware)
+
+In your server (Express):
+
+app.get('/', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+Make sure this is registered before:
+
+express.static(...)
+
+SPA fallback (res.sendFile(index.html))
+
+Any heavy middleware
+
+🔥 4) Make sure Cloud Run is NOT starting the slow file
+
+Your package.json earlier had:
+
+"start": "node dist/index.cjs"
+
+That bypasses any fast health wrapper and starts the slow app directly.
+
+✅ Change it to:
+"start": "node start.cjs"
+
+And ensure start.cjs:
+
+Listens on process.env.PORT
+
+Responds to / instantly
+
+Loads dist/index.cjs after the server is up
+
+✅ Minimum working checklist
+
+After fixes, all must be true:
+
+ No 5000 hardcoded anywhere
+
+ Using process.env.PORT
+
+ No import.meta in .cjs files
+
+ / route returns 200 JSON immediately
+
+ Cloud Run runs node start.cjs, not node dist/index.cjs
+
+🧪 What Cloud Run should see
+
+Container starts
+
+Logs: Listening on 8080
+
+Health check hits / → gets:
+
+{ "status": "ok" }
+
+✅ Promotion succeeds
+
+🧱 If it STILL fails
+
+Then the only remaining culprit is:
+
+Cloud Run is still starting the wrong command, or
+
+dist/index.cjs is crashing on startup due to the import.meta issue
+
+📌 Send me ONE of these and I’ll pinpoint it in one reply:
+
+Your Dockerfile or Cloud Run start command, OR
+
+The first ~40 lines of dist/index.cjs, OR
+
+The first ~40 lines of start.cjs
+
+You’re not far off now — this is a port + entrypoint + CJS path issue, not a mystery. 💪

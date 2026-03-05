@@ -1,0 +1,131 @@
+✅ 1. Health check must return JSON
+
+Cloud Run expects something like:
+
+{ "status": "ok" }
+
+So instead of:
+
+res.send("OK");
+
+Use:
+
+res.status(200).json({ status: "ok" });
+✅ 2. Don’t report healthy before async init is done
+
+Right now your app:
+
+Starts listening
+
+Then registers routes / does async setup
+
+Health check hits /
+
+App says “OK” even though it’s not ready yet ❌
+
+We fix this with a readiness flag.
+
+✅ 3. Block health checks until app is fully initialized
+
+Add a simple global flag:
+
+let isReady = false;
+
+Health endpoint:
+
+app.get("/", (_req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ status: "starting" });
+  }
+  res.status(200).json({ status: "ok" });
+});
+
+app.get("/health", (_req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ status: "starting" });
+  }
+  res.status(200).json({ status: "ok" });
+});
+🧠 4. Only set isReady = true AFTER async setup finishes
+
+Wherever you currently do async setup like:
+
+DB connections
+
+registerRoutes(app)
+
+setupVite(app)
+
+serveStatic(app)
+
+Any await boot logic
+
+Do this:
+
+async function bootstrap() {
+  // register routes
+  await registerRoutes(app);
+
+  // setup vite or static
+  await setupFrontend(app);
+
+  // any other async init
+  await connectDb();
+
+  // NOW we are ready
+  isReady = true;
+}
+
+bootstrap().catch(err => {
+  console.error("Startup failed", err);
+  process.exit(1);
+});
+
+And only then start listening (or if already listening, at least health stays 503 until ready).
+
+🏗️ 5. Best-practice structure (Cloud Run safe)
+
+If your current code does:
+
+app.listen(PORT);
+await registerRoutes(app); // ❌ too late
+
+Change it to:
+
+async function start() {
+  await registerRoutes(app);
+  await setupStuff(app);
+
+  isReady = true;
+
+  app.listen(PORT, () => {
+    console.log("Server listening");
+  });
+}
+
+start().catch(...);
+🧪 Behavior after fix
+
+During startup:
+
+GET / → 503 { "status": "starting" }
+
+After fully initialized:
+
+GET / → 200 { "status": "ok" }
+
+Cloud Run sees:
+
+Not ready → waits
+
+Ready → routes exist → traffic is safe ✅
+
+🧯 Why Cloud Run complained
+
+❌ Plain text instead of JSON
+
+❌ Health check returns OK before app is actually ready
+
+❌ Async route registration after listen = race condition
+
+You were technically responding fast, but lying about readiness 😄 Cloud Run caught that.

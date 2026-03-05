@@ -1,0 +1,159 @@
+🚨 Problem 1: Port mismatch / health check can’t get 200 in time
+
+“The application is listening on port 5000, but the health check endpoint / is not responding with 200 in time”
+
+✅ Cloud Run requirement
+
+Cloud Run always injects a PORT env var (usually 8080).
+Your app must listen on process.env.PORT, not hardcoded 5000.
+
+🔧 Fix (in start.cjs AND/OR dist/index.cjs)
+
+Make sure you have:
+
+const PORT = parseInt(process.env.PORT || '8080', 10);
+
+And:
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Listening on', PORT);
+});
+
+❌ If anywhere you have:
+
+const PORT = 5000;
+
+or similar — remove it.
+
+🚨 Problem 2: CJS + import.meta = broken paths
+
+“The build is using CommonJS (cjs) with import.meta which causes path resolution warnings and may lead to runtime errors”
+
+This is serious: in CommonJS, import.meta is not valid. If your dist/index.cjs uses it, Node will:
+
+Throw warnings or errors
+
+Or stall during startup
+
+Or crash before health checks respond
+→ Result: health check timeout
+
+✅ Fix: Use __dirname in CJS, not import.meta
+
+In dist/index.cjs (or the TS source that builds it), replace patterns like:
+
+import.meta.url
+
+With:
+
+const __dirname = require('path').dirname(__filename);
+
+And for paths:
+
+path.join(__dirname, 'public', 'index.html')
+
+If this is coming from your TS source, fix it there and rebuild.
+
+🚨 Problem 3: / is still not guaranteed fast & 200
+
+“The server may not be properly handling the root / endpoint for health checks”
+
+Cloud Run is hitting:
+
+GET /
+
+And it must get 200 quickly, not SPA, not DB, not async init.
+
+✅ The Minimal, Correct Health Handler (put this FIRST)
+
+In start.cjs (or your very first server entry):
+
+const http = require('http');
+
+const PORT = parseInt(process.env.PORT || '8080', 10);
+let ready = false;
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/') {
+    res.statusCode = ready ? 200 : 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: ready ? 'ok' : 'starting' }));
+    return;
+  }
+
+  if (!ready) {
+    res.statusCode = 503;
+    res.end('warming up');
+    return;
+  }
+
+  res.statusCode = 404;
+  res.end('Not found');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('Health server listening on', PORT);
+});
+
+Then load your heavy app after this:
+
+setImmediate(() => {
+  try {
+    require('./dist/index.cjs');
+    ready = true;
+    console.log('App marked ready');
+  } catch (e) {
+    console.error('App failed to start', e);
+  }
+});
+✅ Also fix your Express app (inside dist/index.cjs)
+
+Make sure you ALSO have (for safety):
+
+app.get('/', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+And this route is registered before static / SPA fallback.
+
+🧪 What Cloud Run should see after this
+
+Container starts
+
+Immediately logs: Health server listening on 8080
+
+Cloud Run hits /:
+
+Gets 503 { status: "starting" }
+
+App finishes loading
+
+ready = true
+
+Cloud Run hits /:
+
+Gets 200 { status: "ok" }
+
+✅ Deployment succeeds
+
+🧱 If it STILL fails after this
+
+Then one of these is still true:
+
+Cloud Run is not using start.cjs as entrypoint
+
+Your container is still listening on 5000 instead of $PORT
+
+dist/index.cjs crashes on startup because of import.meta in CJS
+
+📌 Next step (to finish this in one shot)
+
+Please paste one of these:
+
+Your Dockerfile (if any), OR
+
+Your Cloud Run service “Container command / args”, OR
+
+The first 40 lines of dist/index.cjs
+
+I’ll point to the exact line that’s still breaking your health checks and tell you exactly what to change.

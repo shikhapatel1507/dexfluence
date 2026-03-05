@@ -1,0 +1,123 @@
+🧨 The 3 real possibilities left
+
+Only one of these can be true now:
+
+Cloud Run is still NOT running start.cjs
+
+Something is blocking Node before the HTTP server starts (Dockerfile, buildpack, entrypoint, top-level import, etc.)
+
+The container itself is slow to start (image, build step, or command)
+
+We’ll identify which one in 2 minutes.
+
+✅ Step 1: Prove what file Cloud Run is running
+
+At the VERY TOP of start.cjs, add:
+
+console.log(">>> start.cjs entered <<<");
+
+Redeploy.
+
+🔍 Check Cloud Run logs:
+
+❌ If you DO NOT see >>> start.cjs entered <<< immediately:
+
+Cloud Run is NOT running start.cjs
+
+That means your start command / Dockerfile / buildpack is wrong
+👉 This is the root cause.
+
+✅ If you DO see it:
+
+Then something is blocking before the server starts listening
+
+We move to Step 2.
+
+✅ Step 2: Prove whether the server starts immediately
+
+Right before server.listen(...) in start.cjs, add:
+
+console.log(">>> about to listen <<<");
+
+And inside the listen callback:
+
+console.log(">>> server is listening <<<");
+
+Redeploy and check logs.
+
+🔍 Interpretation:
+
+If you see:
+
+>>> start.cjs entered <<<
+
+but NOT >>> server is listening <<<
+
+👉 Then something is blocking the event loop before the server even starts:
+
+Dockerfile command
+
+Buildpack start phase
+
+A synchronous require
+
+A heavy top-level operation
+
+That’s why health checks time out.
+
+✅ Step 3: The most common real cause (90% of cases)
+
+One of these is true in your setup:
+
+Cloud Run start command is still:
+
+node dist/index.cjs
+
+Or Dockerfile has:
+
+CMD ["node", "dist/index.cjs"]
+
+Or buildpack is using:
+
+"start": "node dist/index.cjs"
+
+Even if you changed package.json, Cloud Run might be ignoring it depending on how you deploy.
+
+📌 Please paste ONE of these
+
+So I can end this in one shot:
+
+Your Dockerfile (if you have one), OR
+
+Your Cloud Run service command / entrypoint, OR
+
+A screenshot / text of the Cloud Run “Container command” setting
+
+🧠 Why I’m confident this is the issue
+
+Cloud Run’s error:
+
+“Health checks are timing out or not returning quickly enough”
+
+This cannot happen if:
+
+A tiny Node server is already listening
+
+And / just returns JSON
+
+So the only explanation left is:
+
+That tiny server is not actually running yet.
+
+Which means:
+
+Wrong entrypoint, or
+
+Something blocking before it starts
+
+💬 You’re very close
+
+We’ve already fixed the app design.
+Now we just need to fix what Cloud Run actually executes.
+
+Send me the start command / Dockerfile and I’ll point to the exact line causing the timeout.

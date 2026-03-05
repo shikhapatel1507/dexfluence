@@ -1,0 +1,157 @@
+✅ The Only Reliable Fix (Cloud Run–safe)
+1) Make start.cjs a tiny health server first
+
+This file must:
+
+Import nothing heavy
+
+Start listening immediately
+
+Answer /, /health, /healthz in < 5 ms
+
+Load your real app in the background
+
+Replace your start.cjs with this minimal version:
+
+'use strict';
+
+const http = require('http');
+const path = require('path');
+
+const PORT = parseInt(process.env.PORT || '8080', 10);
+
+let ready = false;
+
+// 🔹 Ultra-light server: no DB, no app, no imports
+const server = http.createServer((req, res) => {
+  if (req.url === '/' || req.url === '/health' || req.url === '/healthz') {
+    res.statusCode = ready ? 200 : 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: ready ? 'ok' : 'starting' }));
+    return;
+  }
+
+  // Before ready, reject everything else fast
+  if (!ready) {
+    res.statusCode = 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'warming_up' }));
+    return;
+  }
+
+  // After ready, real app should handle routes
+  res.statusCode = 404;
+  res.end('Not Found');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('[boot] Health server listening on', PORT);
+});
+
+// Expose server if your app needs it
+global.__PRELOAD_SERVER__ = server;
+
+// 🔹 Load the real app in background
+setImmediate(() => {
+  try {
+    require(path.join(__dirname, '..', 'dist', 'index.cjs'));
+
+    // The app should set this when fully ready.
+    // Fallback: mark ready after load finishes.
+    if (global.__APP_READY__ !== false) {
+      ready = true;
+    }
+
+    console.log('[boot] App loaded, ready =', ready);
+  } catch (err) {
+    console.error('[boot] Failed to load app:', err);
+    // Stay not-ready so Cloud Run won't route traffic
+  }
+});
+
+// Keep syncing with app readiness flag if it sets it later
+setInterval(() => {
+  if (global.__APP_READY__ === true) {
+    ready = true;
+  }
+}, 500);
+2) In dist/index.cjs, add a readiness flag
+
+At the very top of dist/index.cjs:
+
+global.__APP_READY__ = false;
+
+Wrap your heavy init in an async function:
+
+(async () => {
+  await initDB();
+  await initStorage();
+  await initAI();
+  registerRoutes(app);
+  setupStatic(app);
+
+  global.__APP_READY__ = true;
+  console.log('App fully initialized');
+})();
+
+⚠️ Critical rule:
+There must be no long blocking work at top-level outside this async function.
+
+3) Make sure Cloud Run runs start.cjs, not index.cjs
+
+Your CMD / start script must be:
+
+node start.cjs
+
+Not:
+
+node dist/index.cjs
+
+If Cloud Run runs dist/index.cjs directly → you lose the fast health server → timeouts continue.
+
+🧪 What should happen now
+
+Container starts
+
+[boot] Health server listening on 8080 appears immediately
+
+Cloud Run hits / → gets:
+
+{ "status": "starting" }
+
+in milliseconds
+
+Your app initializes in background (DB, AI, storage, routes…)
+
+When done → global.__APP_READY__ = true
+
+Health check hits / → gets:
+
+{ "status": "ok" }
+
+Cloud Run promotion succeeds ✅
+
+🚨 If it STILL times out after this
+
+Then one of these is true:
+
+Your Dockerfile / buildpack runs heavy stuff before node start.cjs
+
+Or Cloud Run is not actually using start.cjs
+
+Or Node is blocked before even executing this file
+
+In that case, send me:
+
+Your Dockerfile or Cloud Run build config
+
+The exact start command Cloud Run uses
+
+The first 20 lines of start.cjs
+
+I’ll point to the exact line that’s still blocking your health checks.
+
+💬 Straight talk
+
+This error is 100% about startup blocking.
+Once / is handled by a tiny server before any heavy code runs, Cloud Run will stop killing your deployment.

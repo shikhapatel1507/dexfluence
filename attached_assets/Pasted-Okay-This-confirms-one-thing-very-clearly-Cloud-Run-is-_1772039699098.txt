@@ -1,0 +1,186 @@
+Okay. This confirms one thing very clearly: Cloud Run is killing your container before your app finishes booting because your startup path is still blocked by slow initialization.
+
+So we need to make one surgical, reliable change:
+
+Health check must be handled by a tiny, fast server path that does NOT wait for your app to initialize.
+And your heavy app must initialize in the background.
+
+Right now, even after our earlier changes, something in your startup path is still blocking the event loop before the health check can respond.
+
+Let’s fix this in a way that Cloud Run cannot be blocked anymore.
+
+✅ The Bulletproof Cloud Run Pattern (Node)
+
+We will:
+
+Start a minimal HTTP server immediately
+
+Handle /, /health, /healthz inside that minimal server
+
+Kick off your real app in the background
+
+Flip a readiness flag when (and only when) it’s done
+
+This guarantees:
+
+Health checks respond in milliseconds
+
+Even if DB / AI / storage takes 30–60 seconds
+
+Cloud Run will NOT timeout
+
+🛠️ Replace start.cjs with this (important)
+
+This version does zero heavy imports before answering health checks.
+
+'use strict';
+
+const http = require('http');
+const path = require('path');
+
+const PORT = parseInt(process.env.PORT || '5000', 10);
+
+// Readiness flag
+let isReady = false;
+
+// Create ultra-light server
+const server = http.createServer((req, res) => {
+  // Health endpoints
+  if (req.url === '/' || req.url === '/health' || req.url === '/healthz') {
+    res.statusCode = isReady ? 200 : 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: isReady ? 'ok' : 'starting' }));
+    return;
+  }
+
+  // Before ready, reject other traffic fast
+  if (!isReady) {
+    res.statusCode = 503;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: 'Service warming up' }));
+    return;
+  }
+
+  // After ready, let the real app handle requests
+  // (The real app should attach its own listeners/middleware to this server)
+  res.statusCode = 404;
+  res.end('Not Found');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('[start] Listening on port', PORT);
+});
+
+// Expose server to the real app
+global.__PRELOAD_SERVER__ = server;
+
+// Load the heavy app in background
+setImmediate(() => {
+  try {
+    require(path.join(__dirname, '..', 'dist', 'index.cjs'));
+
+    // IMPORTANT: the real app MUST set this when fully ready
+    // We also set a fallback here if it doesn't:
+    if (global.__APP_READY__ !== false) {
+      // If the app didn't manage readiness itself, mark ready now
+      global.__APP_READY__ = true;
+    }
+
+    // Sync local flag
+    isReady = global.__APP_READY__ === true;
+
+    console.log('[start] App loaded, ready =', isReady);
+  } catch (err) {
+    console.error('[start] Failed to load app:', err);
+    // Stay not ready forever -> Cloud Run will not route traffic
+  }
+});
+
+// Poll readiness flag in case app sets it later
+setInterval(() => {
+  if (global.__APP_READY__ === true) {
+    isReady = true;
+  }
+}, 500);
+🧩 Now fix dist/index.cjs (critical)
+
+At the VERY TOP:
+
+global.__APP_READY__ = false;
+
+At the VERY END, after ALL async init is done:
+
+global.__APP_READY__ = true;
+console.log("App fully initialized");
+
+And make sure heavy stuff is in an async function:
+
+(async () => {
+  await initStorage();
+  await initDB();
+  await initAI();
+  registerRoutes(app);
+  setupStatic(app);
+
+  global.__APP_READY__ = true;
+})();
+🚨 If you skip this, Cloud Run will STILL fail
+
+If dist/index.cjs:
+
+Blocks the event loop for 30+ seconds
+
+Or does DB / network calls at top-level
+
+Or runs migrations synchronously
+
+Or imports modules that do heavy work at import time
+
+Then Cloud Run will kill your container before health checks pass.
+
+🧪 What you should see in logs
+
+[start] Listening on port 8080 (or 5000)
+
+Health check hits / → 503 starting
+
+Your app logs:
+
+“connecting to DB…”
+
+“initializing storage…”
+
+Then:
+
+“App fully initialized”
+
+Next health check:
+
+200 { "status": "ok" }
+
+Promotion succeeds ✅
+
+💡 If it STILL fails
+
+Then one of these is true:
+
+Something is blocking Node before start.cjs can even create the server
+
+Or your container image is doing slow work in CMD / ENTRYPOINT
+
+Or require(dist/index.cjs) never returns (stuck on network / DB)
+
+In that case, paste:
+
+Your Dockerfile or Cloud Run build config
+
+The top 50 lines of dist/index.cjs
+
+I’ll pinpoint the exact blocking line. 🔍
+
+Bottom line
+
+This is not a Cloud Run config issue.
+This is a startup architecture issue: your app must become “health-check responsive” before it becomes “fully initialized”.
+
+The pattern above is how production Node services survive Cloud Run, Kubernetes, ECS, etc. every day. 💪
