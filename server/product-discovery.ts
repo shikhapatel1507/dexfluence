@@ -1,6 +1,6 @@
 import * as https from "https";
 import * as http from "http";
-import { getOpenAIClient } from "./ai";
+import { getAnthropicClient } from "./ai";
 
 export interface DiscoveredProduct {
   id: string;
@@ -64,8 +64,18 @@ function extractInstagramHandle(url: string): string {
   return match ? match[1] : url;
 }
 
+async function callAnthropic(prompt: string, maxTokens: number): Promise<string> {
+  const client = getAnthropicClient();
+  const response = await client.messages.create({
+    model: "claude-3-5-haiku-20241022",
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content: prompt }],
+  });
+  const block = response.content[0];
+  return block.type === "text" ? block.text : "[]";
+}
+
 async function discoverFromWebsite(url: string, htmlContent: string): Promise<DiscoveredProduct[]> {
-  const openai = getOpenAIClient();
   const textContent = extractTextFromHtml(htmlContent);
 
   const prompt = `You are a product intelligence specialist for social commerce.
@@ -90,13 +100,7 @@ Return a JSON array of products found on this website. For each product return:
 Extract up to 12 products. If the page is not a product/e-commerce page, extract any services or offerings you can find.
 Return ONLY a valid JSON array. No explanation, no markdown.`;
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-5.2",
-    messages: [{ role: "user", content: prompt }],
-    max_completion_tokens: 4096,
-  });
-
-  const content = response.choices[0]?.message?.content ?? "[]";
+  const content = await callAnthropic(prompt, 4096);
   try {
     const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     const products = JSON.parse(cleaned);
@@ -113,7 +117,6 @@ Return ONLY a valid JSON array. No explanation, no markdown.`;
 
 async function discoverFromInstagram(url: string): Promise<DiscoveredProduct[]> {
   const handle = extractInstagramHandle(url);
-  const openai = getOpenAIClient();
 
   const prompt = `You are a product intelligence specialist for Instagram Shop and social commerce.
 Analyze this Instagram account and infer what products they likely sell based on their handle and niche.
@@ -141,13 +144,7 @@ Return a JSON array of 8 likely products for this Instagram account:
 
 Return ONLY a valid JSON array. No explanation, no markdown.`;
 
-  const response = await openai.chat.completions.create({
-    model: "gpt-5.2",
-    messages: [{ role: "user", content: prompt }],
-    max_completion_tokens: 4096,
-  });
-
-  const content = response.choices[0]?.message?.content ?? "[]";
+  const content = await callAnthropic(prompt, 4096);
   try {
     const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     const products = JSON.parse(cleaned);
@@ -184,7 +181,6 @@ export async function discoverProducts(url: string): Promise<{
     return { products, sourceType, sourceName: domain };
   } catch (fetchError: any) {
     // If fetching fails, fall back to AI-only inference from the URL
-    const openai = getOpenAIClient();
     const normalizedUrl = url.startsWith("http") ? url : `https://${url}`;
     let domain = url;
     try { domain = new URL(normalizedUrl).hostname.replace("www.", ""); } catch {}
@@ -209,13 +205,7 @@ Return a JSON array of 6 likely products for this website:
 }
 Return ONLY a valid JSON array. No explanation.`;
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-5.2",
-      messages: [{ role: "user", content: prompt }],
-      max_completion_tokens: 2048,
-    });
-
-    const content = response.choices[0]?.message?.content ?? "[]";
+    const content = await callAnthropic(prompt, 2048);
     try {
       const cleaned = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
       const products = JSON.parse(cleaned).map((p: any, i: number) => ({
