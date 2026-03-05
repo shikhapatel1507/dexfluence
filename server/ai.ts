@@ -241,3 +241,4 @@ Return ONLY valid JSON.`;
   const content = await callClaude(prompt);
   return parseJSON<HookFormulaResult>(content, { niche, formulas: [] });
 }
+export const getOpenAIClient = getAnthropicClient;
