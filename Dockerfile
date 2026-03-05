@@ -15,3 +15,4 @@ EXPOSE 5000
 
 # Start
 CMD ["npm", "run", "start"]
+ARG CACHEBUST=1772721146
